@@ -29,6 +29,7 @@ db.exec(`
     chatId TEXT NOT NULL,
     role TEXT NOT NULL,
     content TEXT NOT NULL,
+    images TEXT,
     createdAt INTEGER NOT NULL,
     tokens INTEGER DEFAULT 0,
     latency INTEGER DEFAULT 0,

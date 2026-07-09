@@ -5,6 +5,7 @@ export interface Message {
   chatId: string;
   role: 'user' | 'assistant' | 'system';
   content: string;
+  images?: string[];
   createdAt: number;
   tokens?: number;
   latency?: number;
@@ -42,6 +43,8 @@ interface ChatState {
   deleteChat: (id: string) => Promise<void>;
   pinChat: (id: string, isPinned: boolean) => Promise<void>;
   updateChatTitle: (id: string, title: string) => Promise<void>;
+  isSidebarOpen: boolean;
+  toggleSidebar: () => void;
 }
 
 export const useChatStore = create<ChatState>((set, get) => ({
@@ -50,6 +53,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
   messages: [],
   models: [],
   isGenerating: false,
+  isSidebarOpen: true,
+  toggleSidebar: () => set((state) => ({ isSidebarOpen: !state.isSidebarOpen })),
   setChats: (chats) => set({ chats }),
   setActiveChatId: (activeChatId) => set({ activeChatId }),
   setMessages: (messages) => set({ messages }),

@@ -27,29 +27,54 @@ router.post('/', (req, res) => {
 // Get chat messages
 router.get('/:id/messages', (req, res) => {
   const messages = db.prepare('SELECT * FROM messages WHERE chatId = ? ORDER BY createdAt ASC').all(req.params.id);
-  res.json(messages);
+  const parsedMessages = messages.map(m => {
+    if (m.images && typeof m.images === 'string') {
+      try {
+        m.images = JSON.parse(m.images);
+      } catch(e) {}
+    }
+    return m;
+  });
+  res.json(parsedMessages);
 });
 
 // Stream response
 router.post('/:id/stream', async (req, res) => {
   const { id } = req.params;
-  const { message, regenerateId } = req.body;
+  const { message, regenerateId, images, model } = req.body;
   
   const chat = db.prepare('SELECT * FROM chats WHERE id = ?').get(id);
   if (!chat) return res.status(404).json({ error: 'Chat not found' });
 
+  const activeModel = model || chat.model || 'llama3';
+  if (model && model !== chat.model) {
+    db.prepare('UPDATE chats SET model = ?, updatedAt = ? WHERE id = ?').run(model, Date.now(), id);
+  }
+
   // Handle new message
   let userMessageId = uuidv4();
-  if (message) {
-    db.prepare('INSERT INTO messages (id, chatId, role, content, createdAt) VALUES (?, ?, ?, ?, ?)')
-      .run(userMessageId, id, 'user', message, Date.now());
+  if (message || (images && images.length > 0)) {
+    const imagesStr = images ? JSON.stringify(images) : null;
+    db.prepare('INSERT INTO messages (id, chatId, role, content, images, createdAt) VALUES (?, ?, ?, ?, ?, ?)')
+      .run(userMessageId, id, 'user', message || '', imagesStr, Date.now());
   }
 
   // Get full history
-  const history = db.prepare('SELECT role, content FROM messages WHERE chatId = ? ORDER BY createdAt ASC').all(id);
+  const history = db.prepare('SELECT role, content, images FROM messages WHERE chatId = ? ORDER BY createdAt ASC').all(id);
   
   // Format for Ollama
-  const messages = history.map(m => ({ role: m.role, content: m.content }));
+  const messages = history.map(m => {
+    const msg = { role: m.role, content: m.content };
+    if (m.images) {
+      try {
+        const parsedImages = JSON.parse(m.images);
+        if (Array.isArray(parsedImages)) {
+          msg.images = parsedImages.map(img => img.replace(/^data:image\/[a-zA-Z0-9+.-]+;base64,/, ''));
+        }
+      } catch (e) {}
+    }
+    return msg;
+  });
   if (chat.systemPrompt) {
     messages.unshift({ role: 'system', content: chat.systemPrompt });
   }
@@ -63,8 +88,14 @@ router.post('/:id/stream', async (req, res) => {
   const assistantMsgId = regenerateId || uuidv4();
 
   try {
+    const isVisionModel = activeModel.toLowerCase().match(/llava|vision|pixtral|minicpm/);
+    const hasImages = messages.some(m => m.images && m.images.length > 0);
+    if (hasImages && !isVisionModel) {
+      throw new Error("The selected model does not support images. Please select a vision model like 'llava' from the dropdown at the top.");
+    }
+
     const stream = await ollama.chat({
-      model: chat.model || 'llama3',
+      model: activeModel,
       messages,
       stream: true,
       options: {
@@ -97,8 +128,58 @@ router.post('/:id/stream', async (req, res) => {
     res.end();
   } catch (error) {
     console.error('Stream error:', error);
-    res.write(`data: ${JSON.stringify({ error: error.message })}\n\n`);
+    let errorMsg = error.message || String(error);
+    if (errorMsg.toLowerCase().includes('does not support multimodal')) {
+      errorMsg = "The selected model does not support images. Please select a vision model like 'llava' from the dropdown, or run `ollama run llava` in your terminal to install one.";
+    }
+    res.write(`data: ${JSON.stringify({ error: errorMsg })}\n\n`);
     res.end();
+  }
+});
+
+// Edit message and truncate history
+router.post('/:id/edit-message', (req, res) => {
+  const { id } = req.params;
+  const { messageId, newContent } = req.body;
+  
+  const msg = db.prepare('SELECT createdAt FROM messages WHERE id = ? AND chatId = ?').get(messageId, id);
+  if (!msg) return res.status(404).json({ error: 'Message not found' });
+  
+  // Update the user message
+  db.prepare('UPDATE messages SET content = ? WHERE id = ?').run(newContent, messageId);
+  
+  // Delete all messages after this one
+  db.prepare('DELETE FROM messages WHERE chatId = ? AND createdAt > ?').run(id, msg.createdAt);
+  
+  res.json({ success: true });
+});
+
+// Generate Title for Chat
+router.post('/:id/title', async (req, res) => {
+  const { id } = req.params;
+  const { prompt, model } = req.body;
+  
+  try {
+    const response = await ollama.chat({
+      model: model || 'llama3',
+      messages: [
+        { role: 'system', content: 'You are an expert at summarizing. Read the user prompt and generate a short, punchy title for this conversation (max 5 words). Do not use quotes or prefixes. Just the title.' },
+        { role: 'user', content: prompt }
+      ],
+      stream: false,
+    });
+    
+    let generatedTitle = response.message.content.trim();
+    // Clean up any quotes the model might have added
+    if (generatedTitle.startsWith('"') && generatedTitle.endsWith('"')) {
+      generatedTitle = generatedTitle.slice(1, -1);
+    }
+    
+    db.prepare('UPDATE chats SET title = ?, updatedAt = ? WHERE id = ?').run(generatedTitle, Date.now(), id);
+    res.json({ success: true, title: generatedTitle });
+  } catch (error) {
+    console.error('Title generation error:', error);
+    res.status(500).json({ error: error.message });
   }
 });
 
